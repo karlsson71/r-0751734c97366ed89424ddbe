@@ -1,0 +1,152 @@
+name: uml-alpine
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      cmd:
+        description: 'Custom command to run inside Alpine (UML guest)'
+        required: false
+        default: 'wget -q -O - http://example.com > /tmp/example.html && echo NETWORK-OK: got $(wc -c < /tmp/example.html) bytes from example.com'
+        type: string
+      timeout_sec:
+        description: 'Run the command for up to this many seconds (0 = no limit)'
+        required: false
+        default: '0'
+        type: string
+
+jobs:
+  uml:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          for i in $(seq 1 6); do
+            sudo apt-get install -y bc bison flex libssl-dev libelf-dev wget xz-utils cpio jq dwarves && break
+            sleep 20
+          done
+
+      - name: Resolve custom command and time limit
+        env:
+          CMD_IN: ${{ inputs.cmd }}
+          TLIM_IN: ${{ inputs.timeout_sec }}
+        run: |
+          CMD="$CMD_IN"
+          TLIM="$TLIM_IN"
+          [ -z "$CMD" ] && CMD='wget -q -O - http://example.com > /tmp/example.html && echo NETWORK-OK: got $(wc -c < /tmp/example.html) bytes from example.com'
+          [ -z "$TLIM" ] && TLIM=0
+          echo "CMDB64=$(printf '%s' "$CMD" | base64 -w0)" >> "$GITHUB_ENV"
+          echo "TLIM=$TLIM" >> "$GITHUB_ENV"
+          if [ "$TLIM" = "0" ]; then
+            echo "::notice::will run /run.sh (or custom cmd) in UML guest with no time limit"
+          else
+            echo "::notice::will run /run.sh (or custom cmd) in UML guest for up to ${TLIM}s"
+          fi
+
+      - name: Resolve latest stable kernel
+        run: |
+          curl -fsSL https://www.kernel.org/releases.json -o releases.json
+          KVER=$(jq -r '.latest_stable.version' releases.json)
+          KURL=$(jq -r --arg v "$KVER" '.releases[] | select(.version==$v) | .source' releases.json | head -1)
+          echo "KVER=$KVER" >> "$GITHUB_ENV"
+          echo "KURL=$KURL" >> "$GITHUB_ENV" 
+      - name: Download Linux kernel source
+        run: |
+          curl -fsSL "$KURL" | tar -xJ
+          mv "linux-$KVER" linux-src
+
+      - name: Assemble Alpine initramfs
+        run: |
+          AVER=$(curl -fsSL https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/x86_64/ | grep -oP 'alpine-minirootfs-\K[0-9.]+(?=-x86_64\.tar\.gz)' | head -1)
+          echo "AVER=$AVER" >> "$GITHUB_ENV"
+          mkdir -p rootfs
+          curl -fsSL "https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/x86_64/alpine-minirootfs-$AVER-x86_64.tar.gz" | tar -xz -C rootfs
+          mkdir -p rootfs/proc rootfs/sys rootfs/dev
+          echo 'IyEvYmluL3NoCm1vdW50IC10IGRldnRtcGZzIG5vbmUgL2RldiAyPi9kZXYvbnVsbAptb3VudCAtdCBwcm9jIG5vbmUgL3Byb2MKbW91bnQgLXQgc3lzZnMgbm9uZSAvc3lzCmVjaG8gJz09PSBBTFBJTkUgQk9PVEVEIElOU0lERSBVTUwgKHRhcCBuZXR3b3JrKSA9PT0nCmNhdCAvZXRjL2FscGluZS1yZWxlYXNlCkNNREI2ND0kKHNlZCAtbiAncy8uKmNtZGI2ND1cKFteIF0qXCkuKi9cMS9wJyAvcHJvYy9jbWRsaW5lKQpUTElNPSQoc2VkIC1uICdzLy4qdGxpbT1cKFswLTldKlwpLiovXDEvcCcgL3Byb2MvY21kbGluZSkKWyAteiAiJFRMSU0iIF0gJiYgVExJTT0zMAppZiBbIC14IC9ydW4uc2ggXTsgdGhlbgogIENNRD0nL3J1bi5zaCcKZWxpZiBbIC16ICIkQ01EQjY0IiBdOyB0aGVuCiAgQ01EPSdlY2hvIGhlbGxvJwplbHNlCiAgQ01EPSQocHJpbnRmICclcycgIiRDTURCNjQiIHwgYmFzZTY0IC1kKQpmaQppZmNvbmZpZyBsbyAxMjcuMC4wLjEgdXAgMj4vZGV2L251bGwgfHwgdHJ1ZQojIFdhaXQgZm9yIGEgbmV0d29yayBpbnRlcmZhY2UgKGV0aDAvdmVjMCkgdG8gYXBwZWFyIChtYXkgYmUgYWRkZWQgdmlhIG1jb25zb2xlKS4KTkVUSUY9IiIKaT0wCndoaWxlIFsgIiRpIiAtbHQgMzAgXTsgZG8KICBmb3IgZCBpbiAvc3lzL2NsYXNzL25ldC9ldGgwIC9zeXMvY2xhc3MvbmV0L3ZlYzA7IGRvCiAgICBpZiBbIC1lICIkZCIgXTsgdGhlbiBORVRJRj0kKGJhc2VuYW1lICIkZCIpOyBicmVhazsgZmkKICBkb25lCiAgWyAtbiAiJE5FVElGIiBdICYmIGJyZWFrCiAgaT0kKChpKzEpKQogIHNsZWVwIDEKZG9uZQppZiBbIC1uICIkTkVUSUYiIF07IHRoZW4KICBpZmNvbmZpZyAiJE5FVElGIiAxMC4wLjIuMTUgbmV0bWFzayAyNTUuMjU1LjI1NS4wIHVwIDI+L2Rldi9udWxsIHx8IGlwIGFkZHIgYWRkIDEwLjAuMi4xNS8yNCBkZXYgIiRORVRJRiIgMj4vZGV2L251bGwgfHwgdHJ1ZQogIHJvdXRlIGFkZCBkZWZhdWx0IGd3IDEwLjAuMi4xIDI+L2Rldi9udWxsIHx8IGlwIHJvdXRlIGFkZCBkZWZhdWx0IHZpYSAxMC4wLjIuMSAyPi9kZXYvbnVsbCB8fCB0cnVlCmZpCmVjaG8gJ25hbWVzZXJ2ZXIgMS4xLjEuMScgPiAvZXRjL3Jlc29sdi5jb25mCmVjaG8gJ25hbWVzZXJ2ZXIgOC44LjguOCcgPj4gL2V0Yy9yZXNvbHYuY29uZgplY2hvICItLS0gJE5FVElGIC0tLSIKaWYgWyAtbiAiJE5FVElGIiBdOyB0aGVuCiAgaWZjb25maWcgIiRORVRJRiIgMj4vZGV2L251bGwgfCBncmVwIC1FICdpbmV0IHxpbmV0IGFkZHJ8SFdhZGRyfGV0aGVyJyB8fCBpcCAtNCBhZGRyIHNob3cgIiRORVRJRiIgMj4vZGV2L251bGwgfHwgdHJ1ZQplbHNlCiAgZWNobyAibm8gbmV0d29yayBpbnRlcmZhY2UgZm91bmQiCmZpCmVjaG8gIi0tLSByb3V0ZSAtLS0iCnJvdXRlIC1uIDI+L2Rldi9udWxsIHwgaGVhZCAtNSB8fCBpcCByb3V0ZSAyPi9kZXYvbnVsbCB8fCB0cnVlCmlmIFsgIiRUTElNIiA9ICIwIiBdOyB0aGVuCiAgZWNobyAiLS0tIHJ1bm5pbmcgY3VzdG9tIGNtZCAobm8gdGltZSBsaW1pdCk6ICRDTUQgLS0tIgplbHNlCiAgZWNobyAiLS0tIHJ1bm5pbmcgY3VzdG9tIGNtZCAodGltZSBsaW1pdCAke1RMSU19cyk6ICRDTUQgLS0tIgpmaQppZiBbICIkQ01EIiA9ICIvcnVuLnNoIiBdOyB0aGVuCiAgL2Jpbi9zaCAvcnVuLnNoICYKZWxzZQogIHNoIC1jICIkQ01EIiAmCmZpCkNQSUQ9JCEKUkM9MTI0CmlmIFsgIiRUTElNIiA9ICIwIiBdOyB0aGVuCiAgd2FpdCAiJENQSUQiCiAgUkM9JD8KZWxzZQogIGk9MAogIHdoaWxlIFsgIiRpIiAtbHQgIiRUTElNIiBdOyBkbwogICAgaT0kKChpKzEpKQogICAga2lsbCAtMCAiJENQSUQiIDI+L2Rldi9udWxsIHx8IGJyZWFrCiAgICBzbGVlcCAxCiAgZG9uZQogIGlmIGtpbGwgLTAgIiRDUElEIiAyPi9kZXYvbnVsbDsgdGhlbgogICAga2lsbCAtOSAiJENQSUQiIDI+L2Rldi9udWxsCiAgICB3YWl0ICIkQ1BJRCIgMj4vZGV2L251bGwKICAgIGVjaG8gIi0tLSB0aW1lIGxpbWl0IHJlYWNoZWQgKCR7VExJTX1zKSwga2lsbGVkIGNtZCAtLS0iCiAgICBSQz0xMjQKICBlbHNlCiAgICB3YWl0ICIkQ1BJRCIKICAgIFJDPSQ/CiAgZmkKZmkKZWNobyAiLS0tIGNtZCBleGl0IGNvZGU6ICRSQyAtLS0iCmlmIFsgIiRSQyIgLWVxIDAgXTsgdGhlbgogIGVjaG8gJz09PSBVTUwtQUxQSU5FLVRFU1QtUEFTU0VEID09PScKZmkKcG93ZXJvZmYgLWYK' | base64 -d > rootfs/init
+          chmod +x rootfs/init
+          cp run.sh rootfs/run.sh
+          chmod +x rootfs/run.sh
+          sudo mkdir -p rootfs/dev
+          sudo mknod -m 600 rootfs/dev/console c 5 1
+          sudo mknod -m 666 rootfs/dev/tty0 c 4 0
+          sudo mknod -m 666 rootfs/dev/null c 1 3
+          du -sh rootfs
+
+      - name: Build UML kernel with Alpine embedded and vector net
+        run: |
+          cd linux-src
+          make ARCH=um defconfig
+          scripts/config --file .config \
+            -e BLK_DEV_INITRD -e RD_GZIP -e UML_NET -e UML_NET_VECTOR -e SMP \
+            --set-val NR_CPUS 8 \
+            --set-str INITRAMFS_SOURCE "$GITHUB_WORKSPACE/rootfs" \
+            -d DEBUG_INFO -d DEBUG_KERNEL -d DEBUG_FS -d KCOV -d KGDB \
+            -e CC_OPTIMIZE_FOR_PERFORMANCE
+          make ARCH=um olddefconfig
+          make ARCH=um -j"$(nproc)"
+          ls -lh linux
+          grep -E '^CONFIG_UML_NET_VECTOR=|^CONFIG_SMP=|^CONFIG_NR_CPUS=' .config
+
+      - name: Set up host veth pair and NAT
+        run: |
+          sudo sysctl -w net.ipv4.ip_forward=1
+          sudo ip link add veth0 type veth peer name veth0p
+          sudo ip addr add 10.0.2.1/24 dev veth0
+          sudo ip link set veth0 up
+          sudo ip link set veth0p up
+          sudo iptables -t nat -A POSTROUTING -s 10.0.2.0/24 -o eth0 -j MASQUERADE
+          sudo iptables -A FORWARD -i veth0 -o eth0 -j ACCEPT
+          sudo iptables -A FORWARD -i eth0 -o veth0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+          ip -4 addr show veth0
+      - name: Boot Alpine inside UML and run custom command
+        timeout-minutes: 360
+        run: |
+          # Random guest RAM: 3.0-3.5 GiB on a 64 MiB grid.
+          MIN=3072; MAX=3584; STEP=64
+          N=$(( (MAX - MIN) / STEP + 1 ))
+          MEM=$(( MIN + (RANDOM % N) * STEP ))
+          NCPU=$(nproc)
+          UMID=umlrun
+          UMID_DIR="/root/.uml/$UMID"
+          echo "::notice::allocating ${MEM}M guest RAM (random 3072-3584M, 64M grid), ncpus=${NCPU}, tlim=${TLIM} (optimized)"
+          # Back UML guest RAM with tmpfs (try hugepages) and pin CPUs for better memory locality/perf
+          sudo mkdir -p /mnt/uml-mem
+          sudo mount -t tmpfs -o "size=$((MEM + 512))M,huge=within_size" tmpfs /mnt/uml-mem 2>/dev/null || \
+            sudo mount -t tmpfs -o "size=$((MEM + 512))M" tmpfs /mnt/uml-mem
+          MAXCPU=$((NCPU-1))
+          CPUSET="0-${MAXCPU}"
+          UML_CMD="./linux-src/linux umid=$UMID mem=${MEM}M ncpus=${NCPU} seccomp=on quiet loglevel=4 mitigations=off con0=fd:0,fd:1 cmdb64=$CMDB64 tlim=$TLIM"
+          if [ "$TLIM" = "0" ]; then
+            sudo env TMPDIR=/mnt/uml-mem TMP=/mnt/uml-mem taskset -c "$CPUSET" stdbuf -oL -eL $UML_CMD > uml.log 2>&1 &
+          else
+            sudo env TMPDIR=/mnt/uml-mem TMP=/mnt/uml-mem taskset -c "$CPUSET" stdbuf -oL -eL timeout $((TLIM + 180)) $UML_CMD > uml.log 2>&1 &
+          fi
+          UMLPID=$!
+          # Wait for mconsole socket and configure vector network device via mconsole.
+          MCSOCK=""
+          for i in $(seq 1 90); do
+            if sudo test -S "$UMID_DIR/mconsole"; then
+              MCSOCK="$UMID_DIR/mconsole"
+            else
+              MCSOCK=$(grep -oP 'mconsole initialized on \K\S+' uml.log 2>/dev/null | head -1 || true)
+            fi
+            if [ -n "$MCSOCK" ] && sudo test -S "$MCSOCK"; then
+              echo "mconsole socket: $MCSOCK"
+              echo 'aW1wb3J0IHNvY2tldCxzdHJ1Y3Qsc3lzLG9zCnNvY2s9c3lzLmFyZ3ZbMV0KY21kPWIiY29uZmlnIHZlYzA6dHJhbnNwb3J0PXJhdyxpZm5hbWU9dmV0aDBwLG1hYz1kZTphZDpiZTplZjowMDowMSxkZXB0aD0xMjgsZ3JvPTEiCnJlcT1zdHJ1Y3QucGFjaygiSUlJIiwweGNhZmViYWJlLDIsbGVuKGNtZCkpK2NtZC5sanVzdCg1MTIsYiJceDAwIikKYz1zb2NrZXQuc29ja2V0KHNvY2tldC5BRl9VTklYLHNvY2tldC5TT0NLX0RHUkFNKQpjcz0iL3RtcC91bWxfbWNfY2xpZW50LiIrc3RyKG9zLmdldHBpZCgpKQp0cnk6CiAgICBvcy51bmxpbmsoY3MpCmV4Y2VwdCBGaWxlTm90Rm91bmRFcnJvcjoKICAgIHBhc3MKYy5iaW5kKGNzKQpjLnNlbmR0byhyZXEsc29jaykKYy5zZXR0aW1lb3V0KDUpCnRyeToKICAgIGRhdGEsXz1jLnJlY3Zmcm9tKDQwOTYpCiAgICBlcnIsbW9yZSxsbj1zdHJ1Y3QudW5wYWNrKCJJSUkiLGRhdGFbOjEyXSkKICAgIHByaW50KCJtY29uc29sZSByZXBseSBlcnI9JWQgbW9yZT0lZCBtc2c9JXIiJShlcnIsbW9yZSxkYXRhWzEyOjEyK2xuXS5kZWNvZGUoZXJyb3JzPSJyZXBsYWNlIikpKQpleGNlcHQgRXhjZXB0aW9uIGFzIGU6CiAgICBwcmludCgibWNvbnNvbGUgcmVjdiBlcnJvcjoiLGUpCmMuY2xvc2UoKQp0cnk6CiAgICBvcy51bmxpbmsoY3MpCmV4Y2VwdCBFeGNlcHRpb246CiAgICBwYXNzCg==' | base64 -d | sudo python3 - "$MCSOCK"
+              break
+            fi
+            if [ $((i % 10)) -eq 0 ]; then echo "waiting for mconsole... (${i}s) sock='${MCSOCK}'"; fi
+            sleep 1
+          done
+          if [ -z "$MCSOCK" ] || ! sudo test -S "$MCSOCK"; then echo "warning: mconsole socket not found/ready"; fi
+          wait $UMLPID || true
+          echo "----- UML boot log -----"
+          tail -120 uml.log
+          grep -q '=== ALPINE BOOTED INSIDE UML' uml.log || { echo '::error::UML never booted Alpine'; exit 1; }
+          grep -q 'cmd exit code: 0' uml.log || { echo '::error::custom command finished with a non-zero status'; exit 1; }
+          grep -q 'Power down' uml.log || { echo '::error::guest did not power down cleanly'; exit 1; }
+          echo "::notice::custom command ran inside Alpine $AVER on UML kernel $KVER over veth+NAT with ${MEM}M guest RAM, ncpus=${NCPU}"
